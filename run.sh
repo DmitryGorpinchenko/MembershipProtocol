@@ -18,16 +18,6 @@ if [ ! -e "Application.cpp" ]; then
   exit 1
 fi
 
-if [ ! -e "mp1-regen-data" ]; then
-  echo -e '\n\nERROR: The "mp1-regen-data" file was not found in this directory. Replace it from the files you were given.\n\n'
-  exit 1
-fi
-
-if [ ! $(which tar) ]; then
-  echo -e '\n\nERROR: Your system needs the "tar" command to be installed first.\n\n'
-  exit 1
-fi
-
 if [ ! $(which make) ]; then
   echo -e '\n\nERROR: You do not have the "make" tool installed in your shell environment.\n\n'
   exit 1
@@ -38,17 +28,9 @@ if [ ! $(which g++) ]; then
   exit 1
 fi
 
-rm -rf grade-dir # Make sure grade-dir is clean before starting
 rm -f dbg.*.log
+rm -f dbg.log
 
-mkdir grade-dir
-cd grade-dir
-
-cp ../mp1-regen-data mp1-regen-data-tmp.tar
-tar -xf mp1-regen-data-tmp.tar
-
-cd mp1
-cp ../../MP1Node.* .
 make clean > /dev/null
 make > /dev/null
 
@@ -58,11 +40,8 @@ if [ ! -e "./Application" ]; then
 fi
 
 ./Application testcases/singlefailure.conf > /dev/null
-cp dbg.log ../../dbg.0.log
+cp dbg.log dbg.0.log
 ./Application testcases/multifailure.conf > /dev/null
-cp dbg.log ../../dbg.1.log
+cp dbg.log dbg.1.log
 ./Application testcases/msgdropsinglefailure.conf > /dev/null
-cp dbg.log ../../dbg.2.log
-cd ../..
-rm -rf grade-dir
-
+cp dbg.log dbg.2.log
