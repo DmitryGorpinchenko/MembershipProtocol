@@ -1,99 +1,89 @@
-/**********************************
- * FILE NAME: EmulNet.h
- *
- * DESCRIPTION: Emulated Network classes header file
- **********************************/
+#ifndef EMULNET_H
+#define EMULNET_H
 
-#ifndef _EMULNET_H_
-#define _EMULNET_H_
+#include <vector>
+#include <queue>
+#include <unordered_map>
+#include <random>
+#include <string>
+#include <cstdint>
+#include <cstring>
 
-#define MAX_NODES 1000
-#define MAX_TIME 3600
-#define ENBUFFSIZE 30000
+struct Address {
+    const int32_t ip = 0;
+    const int16_t port = 0;
 
-#include "stdincludes.h"
-#include "Params.h"
-#include "Member.h"
+    Address() = default;
+    Address(int32_t _ip, int16_t _port);
 
-using namespace std;
+    std::string toString() const;
 
-/**
- * Struct Name: en_msg
- */
-typedef struct en_msg {
-    // Number of bytes after the class
-    int size;
-    // Source node
-    Address from;
-    // Destination node
-    Address to;
-}en_msg;
-
-/**
- * Class Name: EM
- */
-class EM {
-public:
-    int nextid;
-    int currbuffsize;
-    int firsteltindex;
-    en_msg* buff[ENBUFFSIZE];
-    EM() {}
-    EM& operator = (EM &anotherEM) {
-        this->nextid = anotherEM.getNextId();
-        this->currbuffsize = anotherEM.getCurrBuffSize();
-        this->firsteltindex = anotherEM.getFirstEltIndex();
-        int i = this->currbuffsize;
-        while (i > 0) {
-            this->buff[i] = anotherEM.buff[i];
-            i--;
-        }
-        return *this;
-    }
-    int getNextId() {
-        return nextid;
-    }
-    int getCurrBuffSize() {
-        return currbuffsize;
-    }
-    int getFirstEltIndex() {
-        return firsteltindex;
-    }
-    void setNextId(int nextid) {
-        this->nextid = nextid;
-    }
-    void settCurrBuffSize(int currbuffsize) {
-        this->currbuffsize = currbuffsize;
-    }
-    void setFirstEltIndex(int firsteltindex) {
-        this->firsteltindex = firsteltindex;
-    }
-    virtual ~EM() {}
+    size_t hashCode() const;
+    bool operator ==(const Address &other) const;
+    bool operator !=(const Address &other) const;
 };
 
-/**
- * CLASS NAME: EmulNet
- *
- * DESCRIPTION: This class defines an emulated network
- */
-class EmulNet
-{ 	
+namespace std {
+
+template <> struct hash<Address> {
+    size_t operator()(const Address &addr) const {
+        return addr.hashCode();
+    }
+};
+
+}
+
+class MsgData {
+public:
+    const void *getData() const;
+    size_t getSize() const;
+
+    template <typename T>
+    void append(const T &data) {
+        const size_t old_size = buf.size();
+        buf.resize(old_size + sizeof(data));
+        memcpy(buf.data() + old_size, &data, sizeof(data));
+    }
+
+    template <typename T>
+    T scan(size_t &cursor) const {
+        T data;
+        memcpy(&data, buf.data() + cursor, sizeof(data));
+        cursor += sizeof(data);
+        return data;
+    }
+
 private:
-    Params* par;
-    int sent_msgs[MAX_NODES + 1][MAX_TIME];
-    int recv_msgs[MAX_NODES + 1][MAX_TIME];
-    int enInited;
-    EM emulnet;
-public:
-    EmulNet(Params *p);
-    EmulNet(EmulNet &anotherEmulNet);
-    EmulNet& operator = (EmulNet &anotherEmulNet);
-    virtual ~EmulNet();
-    void *ENinit(Address *myaddr, short port);
-    int ENsend(Address *myaddr, Address *toaddr, string data);
-    int ENsend(Address *myaddr, Address *toaddr, char *data, int size);
-    int ENrecv(Address *myaddr, int (* enq)(void *, char *, int), struct timeval *t, int times, void *queue);
-    int ENcleanup();
+    std::vector<int8_t> buf;
 };
 
-#endif /* _EMULNET_H_ */
+struct Msg {
+    Address from;
+    MsgData data;
+};
+
+class EmulNet {
+public:
+    EmulNet(double _msg_drop_prob);
+
+    EmulNet(const EmulNet &) = delete;
+    EmulNet &operator =(const EmulNet &) = delete;
+    
+    Address getNewAddress(short port);
+    bool send(Address to, const Msg &msg, bool use_tcp);
+    bool send(Address to, Msg &&msg, bool use_tcp);
+    void recv(Address to, std::queue<Msg> &queue);
+
+private:
+    bool dropMsg();
+
+    int next_ip;
+    double msg_drop_prob;
+    std::random_device rd;
+    std::mt19937 gen;
+    std::bernoulli_distribution d;
+
+    std::unordered_map<Address, std::vector<Msg>> buf;
+};
+
+#endif /* EMULNET_H */

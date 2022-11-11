@@ -1,42 +1,19 @@
-/**********************************
- * FILE NAME: Log.h
- *
- * DESCRIPTION: Header file of Log class
- **********************************/
+#ifndef LOG_H
+#define LOG_H
 
-#ifndef _LOG_H_
-#define _LOG_H_
+#include <fstream>
+#include <string>
 
-#include "stdincludes.h"
-#include "Params.h"
-#include "Member.h"
+struct Address;
 
-/*
- * Macros
- */
-// number of writes after which to flush file
-#define MAXWRITES 1
-#define MAGIC_NUMBER "CS425"
-#define DBG_LOG "dbg.log"
-#define STATS_LOG "stats.log"
-
-/**
- * CLASS NAME: Log
- *
- * DESCRIPTION: Functions to log messages in a debug log
- */
-class Log{
-private:
-    Params *par;
-    bool firstTime;
+class Log {
 public:
-    Log(Params *p);
-    Log(const Log &anotherLog);
-    Log& operator = (const Log &anotherLog);
-    virtual ~Log();
-    void LOG(Address *, const char * str, ...);
-    void logNodeAdd(Address *, Address *);
-    void logNodeRemove(Address *, Address *);
+    Log(const char *file_name);
+
+    void append(Address addr, const std::string &str);
+
+private:
+    std::ofstream os;
 };
 
-#endif /* _LOG_H_ */
+#endif /* LOG_H */

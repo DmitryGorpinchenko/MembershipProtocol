@@ -1,168 +1,154 @@
-/**********************************
- * FILE NAME: MP1Node.cpp
- *
- * DESCRIPTION: Membership protocol run by this Node.
- * 				Definition of MP1Node class functions.
- **********************************/
-
 #include "MP1Node.h"
+#include "Log.h"
+#include "Member.h"
+#include "EmulNet.h"
+#include "GlobalTime.h"
 
-/*
- * Note: You can change/add any functions in MP1Node.{h,cpp}
- */
+#include <cstring>
+#include <algorithm>
+#include <random>
 
-/**
- * Overloaded Constructor of the MP1Node class
- * You can add new members to the class if you think it
- * is necessary for your logic to work
- */
-MP1Node::MP1Node(Member *member, Params *params, EmulNet *emul, Log *log, Address *address) {
-    for( int i = 0; i < 6; i++ ) {
-        NULLADDR[i] = 0;
-    }
-    this->memberNode = member;
-    this->emulNet = emul;
-    this->log = log;
-    this->par = params;
-    this->memberNode->addr = *address;
+namespace {
+
+constexpr uint64_t c_t_remove = 20;
+constexpr uint64_t c_t_fail = 5;
+constexpr size_t c_fanout_size = 2;
+
+struct MemberInfo {
+    Address addr;
+    uint64_t heartbeat;
+};
+
+void LogNodeAdd(Address this_node, Address added_node, Log &log) {
+    std::string str;
+    str += "Node ";
+    str += added_node.toString();
+    str += " joined at time ";
+    str += std::to_string(GlobalTime::Instance().getCurrTime());
+    log.append(this_node, str);
 }
 
-/**
- * Destructor of the MP1Node class
- */
-MP1Node::~MP1Node() {}
+void LogNodeRemove(Address this_node, Address removed_node, Log &log) {
+    std::string str;
+    str += "Node ";
+    str += removed_node.toString();
+    str += " removed at time ";
+    str += std::to_string(GlobalTime::Instance().getCurrTime());
+    log.append(this_node, str);
+}
 
-/**
- * FUNCTION NAME: recvLoop
- *
- * DESCRIPTION: This function receives message from the network and pushes into the queue
- * 				This function is called by a node to receive messages currently waiting for it
- */
-int MP1Node::recvLoop() {
-    if ( memberNode->bFailed ) {
-        return false;
+void SendMemberList(const std::vector<Address> &to_list, MsgType ty, bool use_tcp, const Member &mem, EmulNet &en) {
+    std::vector<MemberInfo> infos;
+    infos.push_back({mem.addr, mem.heartbeat});
+    for (const auto &m : mem.member_list) {
+        if (!m.marked_failed) {
+            infos.push_back({m.addr, m.heartbeat});
+        }
     }
-    else {
-        return emulNet->ENrecv(&(memberNode->addr), enqueueWrapper, NULL, 1, &(memberNode->mp1q));
+    const uint64_t sz = infos.size();
+
+    MsgData data;
+    data.append(ty);
+    data.append(sz);
+    for (const auto &i : infos) {
+        data.append(i);
+    }
+
+    for (const auto &to : to_list) {
+        en.send(to, Msg{mem.addr, data}, use_tcp);
     }
 }
 
-/**
- * FUNCTION NAME: enqueueWrapper
- *
- * DESCRIPTION: Enqueue the message from Emulnet into the queue
- */
-int MP1Node::enqueueWrapper(void *env, char *buff, int size) {
-    Queue q;
-    return q.enqueue((queue<q_elt> *)env, (void *)buff, size);
+std::vector<MemberInfo> ScanMemberInfoList(const MsgData &data, size_t cursor) {
+    const auto sz = data.scan<uint64_t>(cursor);
+
+    std::vector<MemberInfo> res;
+    res.reserve(sz);
+    for (uint64_t i = 0; i < sz; ++i) {
+        res.push_back(data.scan<MemberInfo>(cursor));
+    }
+    return res;
+}
+
+std::vector<Address> Fanout(const MemberList &list, size_t fanout_size) {
+    MemberList alive_list;
+    for (const auto &m : list) {
+        if (!m.marked_failed) {
+            alive_list.push_back(m);
+        }
+    }
+    if (alive_list.empty()) {
+        return {};
+    }
+
+    MemberList sublist;
+    std::sample(alive_list.begin(), alive_list.end(), std::back_inserter(sublist), fanout_size, std::mt19937(std::random_device()()));
+
+    std::vector<Address> res;
+    res.reserve(sublist.size());
+    for (const auto &m : sublist) {
+        res.push_back(m.addr);
+    }
+    return res;
+}
+
+bool AddUnique(MemberInfo info, MemberList& list) {
+    for (const auto &m : list) {
+        if (m.addr == info.addr) {
+            return false;
+        }
+    }
+    list.emplace_back(info.addr, info.heartbeat);
+    return true;
+}
+
+void Update(MemberInfo info, MemberList& list) {
+    for (auto &m : list) {
+        if (m.addr == info.addr) {
+            if (info.heartbeat > m.heartbeat) {
+                m.heartbeat = info.heartbeat;
+                m.timestamp = GlobalTime::Instance().getCurrTime();
+                m.marked_failed = false;
+            }
+            break;
+        }
+    }
+}
+
+}
+
+MP1Node::MP1Node(Member &_mem, EmulNet &_en, Log &_log)
+    : mem(_mem)
+    , en(_en)
+    , log(_log)
+    , is_coordinator(false)
+{
 }
 
 /**
  * FUNCTION NAME: nodeStart
  *
  * DESCRIPTION: This function bootstraps the node
- * 				All initializations routines for a member.
  * 				Called by the application layer.
  */
-void MP1Node::nodeStart(char *servaddrstr, short servport) {
-    Address joinaddr;
-    joinaddr = getJoinAddress();
+void MP1Node::nodeStart(Address joinaddr) {
+    if (!mem.inited) {
+        mem.inited = true;
+        mem.in_group = false;
+        mem.failed = false;
+        mem.heartbeat = 0;
+        mem.member_list.clear();
 
-    // Self booting routines
-    if( initThisNode(&joinaddr) == -1 ) {
-#ifdef DEBUGLOG
-        log->LOG(&memberNode->addr, "init_thisnode failed. Exit.");
-#endif
-        exit(1);
+        introduceSelfToGroup(joinaddr);
     }
-
-    if( !introduceSelfToGroup(&joinaddr) ) {
-        finishUpThisNode();
-#ifdef DEBUGLOG
-        log->LOG(&memberNode->addr, "Unable to join self to group. Exiting.");
-#endif
-        exit(1);
-    }
-
-    return;
 }
 
-/**
- * FUNCTION NAME: initThisNode
- *
- * DESCRIPTION: Find out who I am and start up
- */
-int MP1Node::initThisNode(Address *joinaddr) {
-    /*
-     * This function is partially implemented and may require changes
-     */
-    int id = *(int*)(&memberNode->addr.addr);
-    int port = *(short*)(&memberNode->addr.addr[4]);
-
-    memberNode->bFailed = false;
-    memberNode->inited = true;
-    memberNode->inGroup = false;
-    // node is up!
-    memberNode->nnb = 0;
-    memberNode->heartbeat = 0;
-    memberNode->pingCounter = TFAIL;
-    memberNode->timeOutCounter = -1;
-    initMemberListTable(memberNode);
-
-    return 0;
-}
-
-/**
- * FUNCTION NAME: introduceSelfToGroup
- *
- * DESCRIPTION: Join the distributed system
- */
-int MP1Node::introduceSelfToGroup(Address *joinaddr) {
-    MessageHdr *msg;
-#ifdef DEBUGLOG
-    static char s[1024];
-#endif
-
-    if ( 0 == memcmp((char *)&(memberNode->addr.addr), (char *)&(joinaddr->addr), sizeof(memberNode->addr.addr))) {
-        // I am the group booter (first process to join the group). Boot up the group
-#ifdef DEBUGLOG
-        log->LOG(&memberNode->addr, "Starting up group...");
-#endif
-        memberNode->inGroup = true;
+void MP1Node::nodeFinish() {
+    if (mem.inited) {
+        mem.inited = false;
+        mem.in_group = false;
+        mem.member_list.clear();
     }
-    else {
-        size_t msgsize = sizeof(MessageHdr) + sizeof(joinaddr->addr) + sizeof(long) + 1;
-        msg = (MessageHdr *) malloc(msgsize * sizeof(char));
-
-        // create JOINREQ message: format of data is {struct Address myaddr}
-        msg->msgType = JOINREQ;
-        memcpy((char *)(msg+1), &memberNode->addr.addr, sizeof(memberNode->addr.addr));
-        memcpy((char *)(msg+1) + 1 + sizeof(memberNode->addr.addr), &memberNode->heartbeat, sizeof(long));
-
-#ifdef DEBUGLOG
-        sprintf(s, "Trying to join...");
-        log->LOG(&memberNode->addr, s);
-#endif
-
-        // send JOINREQ message to introducer member
-        emulNet->ENsend(&memberNode->addr, joinaddr, (char *)msg, msgsize);
-
-        free(msg);
-    }
-
-    return 1;
-
-}
-
-/**
- * FUNCTION NAME: finishUpThisNode
- *
- * DESCRIPTION: Wind up this node and clean up state
- */
-int MP1Node::finishUpThisNode(){
-   /*
-    * Your code goes here
-    */
 }
 
 /**
@@ -172,110 +158,118 @@ int MP1Node::finishUpThisNode(){
  * 				Check your messages in queue and perform membership protocol duties
  */
 void MP1Node::nodeLoop() {
-    if (memberNode->bFailed) {
-        return;
+    if (mem.inited && !mem.failed) {
+        checkMessages();
+        nodeLoopOps();
     }
-
-    // Check my messages
-    checkMessages();
-
-    // Wait until you're in the group...
-    if( !memberNode->inGroup ) {
-        return;
-    }
-
-    // ...then jump in and share your responsibilites!
-    nodeLoopOps();
-
-    return;
 }
 
-/**
- * FUNCTION NAME: checkMessages
- *
- * DESCRIPTION: Check messages in the queue and call the respective message handler
- */
+void MP1Node::introduceSelfToGroup(Address joinaddr) {
+    if (mem.addr == joinaddr) {
+        // I am the group booter (first process to join the group). Boot up the group
+        log.append(mem.addr, "Starting up group...");
+
+        mem.in_group = true;
+        is_coordinator = true;
+    }
+    else {
+        log.append(mem.addr, "Trying to join...");
+
+        const auto ty = MsgType::JOINREQ;
+        const auto hb = mem.heartbeat;
+        MsgData data;
+        data.append(ty);
+        data.append(hb);
+
+        en.send(joinaddr, Msg{mem.addr, std::move(data)}, true);
+    }
+}
+
 void MP1Node::checkMessages() {
-    void *ptr;
-    int size;
+    en.recv(mem.addr, mem.mp1q);
 
-    // Pop waiting messages from memberNode's mp1q
-    while ( !memberNode->mp1q.empty() ) {
-        ptr = memberNode->mp1q.front().elt;
-        size = memberNode->mp1q.front().size;
-        memberNode->mp1q.pop();
-        recvCallBack((void *)memberNode, (char *)ptr, size);
+    while (!mem.mp1q.empty()) {
+        recvCallBack(mem.mp1q.front());
+        mem.mp1q.pop();
     }
-    return;
 }
 
-/**
- * FUNCTION NAME: recvCallBack
- *
- * DESCRIPTION: Message handler for different message types
- */
-bool MP1Node::recvCallBack(void *env, char *data, int size ) {
-    /*
-     * Your code goes here
-     */
+void MP1Node::recvCallBack(const Msg &msg) {
+    size_t cursor = 0;
+    const auto ty = msg.data.scan<MsgType>(cursor);
+
+    if (ty == MsgType::JOINREQ) {
+        if (is_coordinator) {
+            const auto hb = msg.data.scan<uint64_t>(cursor);
+            auto &l = mem.member_list;
+            if (AddUnique({msg.from, hb}, l)) {
+                LogNodeAdd(mem.addr, msg.from, log);
+
+                ++mem.heartbeat;
+                SendMemberList({msg.from}, MsgType::JOINREP, true,  mem, en);
+            }
+        }
+    }
+    else if (ty == MsgType::JOINREP) {
+        if (!is_coordinator) {
+            auto &l = mem.member_list;
+            l.clear();
+            for (const auto &i : ScanMemberInfoList(msg.data, cursor)) {
+                if (i.addr != mem.addr) {
+                    if (AddUnique(i, l)) {
+                        LogNodeAdd(mem.addr, i.addr, log);
+                    }
+                }
+            }
+            mem.in_group = true;
+        }
+    }
+    else if (ty == MsgType::GOSSIP) {
+        if (mem.in_group) {
+            auto &l = mem.member_list;
+            for (const auto &i : ScanMemberInfoList(msg.data, cursor)) {
+                if (i.addr != mem.addr) {
+                    if (AddUnique(i, l)) {
+                        LogNodeAdd(mem.addr, i.addr, log);
+                    }
+                    else {
+                        Update(i, l);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /**
  * FUNCTION NAME: nodeLoopOps
  *
- * DESCRIPTION: Check if any node hasn't responded within a timeout period and then delete
- * 				the nodes
+ * DESCRIPTION: Check if any node hasn't responded within a timeout period and then delete the nodes
  * 				Propagate your membership list
  */
 void MP1Node::nodeLoopOps() {
+    if (!mem.in_group) {
+        return;
+    }
 
-    /*
-     * Your code goes here
-     */
+    const auto global_time = GlobalTime::Instance().getCurrTime();
 
-    return;
-}
+    MemberList new_list;
+    for (auto m : mem.member_list) {
+        const bool remove = m.marked_failed && (global_time > m.timestamp + c_t_remove);
+        if (!remove) {
+            const bool mark_failed = !m.marked_failed && (global_time > m.timestamp + c_t_fail);
+            if (mark_failed) {
+                m.timestamp = global_time;
+                m.marked_failed = true;
+            }
+            new_list.push_back(m);
+        } else {
+            LogNodeRemove(mem.addr, m.addr, log);
+        }
+    }
+    mem.member_list = std::move(new_list);
 
-/**
- * FUNCTION NAME: isNullAddress
- *
- * DESCRIPTION: Function checks if the address is NULL
- */
-int MP1Node::isNullAddress(Address *addr) {
-    return (memcmp(addr->addr, NULLADDR, 6) == 0 ? 1 : 0);
-}
-
-/**
- * FUNCTION NAME: getJoinAddress
- *
- * DESCRIPTION: Returns the Address of the coordinator
- */
-Address MP1Node::getJoinAddress() {
-    Address joinaddr;
-
-    memset(&joinaddr, 0, sizeof(Address));
-    *(int *)(&joinaddr.addr) = 1;
-    *(short *)(&joinaddr.addr[4]) = 0;
-
-    return joinaddr;
-}
-
-/**
- * FUNCTION NAME: initMemberListTable
- *
- * DESCRIPTION: Initialize the membership list
- */
-void MP1Node::initMemberListTable(Member *memberNode) {
-    memberNode->memberList.clear();
-}
-
-/**
- * FUNCTION NAME: printAddress
- *
- * DESCRIPTION: Print the Address
- */
-void MP1Node::printAddress(Address *addr)
-{
-    printf("%d.%d.%d.%d:%d \n",  addr->addr[0],addr->addr[1],addr->addr[2],
-                                                       addr->addr[3], *(short*)&addr->addr[4]) ;    
+    ++mem.heartbeat;
+    SendMemberList(Fanout(mem.member_list, c_fanout_size), MsgType::GOSSIP, false, mem, en);
 }

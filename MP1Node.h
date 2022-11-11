@@ -1,47 +1,19 @@
-/**********************************
- * FILE NAME: MP1Node.cpp
- *
- * DESCRIPTION: Membership protocol run by this Node.
- * 				Header file of MP1Node class.
- **********************************/
+#ifndef MP1NODE_H
+#define MP1NODE_H
 
-#ifndef _MP1NODE_H_
-#define _MP1NODE_H_
+#include <cstdint>
 
-#include "stdincludes.h"
-#include "Log.h"
-#include "Params.h"
-#include "Member.h"
-#include "EmulNet.h"
-#include "Queue.h"
+class Member;
+class EmulNet;
+class Log;
+struct Address;
+struct Msg;
 
-/**
- * Macros
- */
-#define TREMOVE 20
-#define TFAIL 5
-
-/*
- * Note: You can change/add any functions in MP1Node.{h,cpp}
- */
-
-/**
- * Message Types
- */
-enum MsgTypes{
+enum class MsgType : int32_t {
     JOINREQ,
     JOINREP,
-    DUMMYLASTMSGTYPE
+    GOSSIP,
 };
-
-/**
- * STRUCT NAME: MessageHdr
- *
- * DESCRIPTION: Header and content of a message
- */
-typedef struct MessageHdr {
-    enum MsgTypes msgType;
-} MessageHdr;
 
 /**
  * CLASS NAME: MP1Node
@@ -49,33 +21,25 @@ typedef struct MessageHdr {
  * DESCRIPTION: Class implementing Membership protocol functionalities for failure detection
  */
 class MP1Node {
-private:
-    EmulNet *emulNet;
-    Log *log;
-    Params *par;
-    Member *memberNode;
-    char NULLADDR[6];
-
 public:
-    MP1Node(Member *, Params *, EmulNet *, Log *, Address *);
-    Member * getMemberNode() {
-        return memberNode;
-    }
-    int recvLoop();
-    static int enqueueWrapper(void *env, char *buff, int size);
-    void nodeStart(char *servaddrstr, short serverport);
-    int initThisNode(Address *joinaddr);
-    int introduceSelfToGroup(Address *joinAddress);
-    int finishUpThisNode();
+    MP1Node(Member &_mem, EmulNet &_en, Log &_log);
+
+    Member &getMember() { return mem; }
+
+    void nodeStart(Address joinaddr);
+    void nodeFinish();
     void nodeLoop();
+
+private:
+    void introduceSelfToGroup(Address joinaddr);
     void checkMessages();
-    bool recvCallBack(void *env, char *data, int size);
+    void recvCallBack(const Msg &msg);
     void nodeLoopOps();
-    int isNullAddress(Address *addr);
-    Address getJoinAddress();
-    void initMemberListTable(Member *memberNode);
-    void printAddress(Address *addr);
-    virtual ~MP1Node();
+
+    Member &mem;
+    EmulNet &en;
+    Log &log;
+    bool is_coordinator;
 };
 
-#endif /* _MP1NODE_H_ */
+#endif /* MP1NODE_H */
